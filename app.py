@@ -4,6 +4,9 @@ import streamlit.components.v1 as components
 from utils import search_recipes
 from generate_pdf import create_shopping_list_pdf
 
+PAGE_SIZE = 12  # 12 recipe cards per page
+API_FETCH_LIMIT = 600  # how many to fetch per search; adjust if you want more pages
+
 # --- Page config ---
 st.set_page_config(page_title="Bella Papaya Recipe Search", page_icon="🍽️", layout="wide")
 st.markdown('<div id="top"></div>', unsafe_allow_html=True)
@@ -15,8 +18,33 @@ if "shopping_list" not in st.session_state:
     st.session_state.shopping_list = []
 if "recipe_results" not in st.session_state:
     st.session_state.recipe_results = []
+if "current_page" not in st.session_state:
+    st.session_state.current_page = 0
 
-# --- Search form ---
+# ======================================================
+# Instant-react Filters (OUTSIDE the form to avoid delay)
+# ======================================================
+st.markdown("### 🧪 Filters")
+
+gluten_free = st.toggle("🌾 Gluten-Free Only", key="gluten_toggle", value=False)
+
+use_max_calories = st.toggle("⚡ Max Calories Filter", key="maxc_toggle", value=False)
+if use_max_calories:
+    max_calories = st.slider("Max Calories (kcal)", 100, 1500, 1000, step=50, key="maxc_slider")
+else:
+    max_calories = None
+
+use_min_protein = st.toggle("💪 Min Protein Filter", key="minp_toggle", value=False)
+if use_min_protein:
+    min_protein = st.slider("Min Protein (g)", 0, 100, 5, step=5, key="minp_slider")
+else:
+    min_protein = None
+
+st.markdown("---")
+
+# --------------------------
+# Search form (submit action)
+# --------------------------
 with st.form("search_form"):
     query = st.text_input("🔍 Enter a keyword (e.g., egg, chicken, pasta):", placeholder="egg")
 
@@ -25,11 +53,7 @@ with st.form("search_form"):
     meal_type_clean = meal_type_selection.split(" ", 1)[-1].lower()
     meal_type = None if "any" in meal_type_clean else meal_type_clean
 
-    gluten_free = st.toggle("🌾 Gluten-Free Only")
-    max_calories = st.slider("Max Calories (kcal)", 100, 1500, 1000, step=50)
-    min_protein = st.slider("Min Protein (g)", 0, 100, 5, step=5)
-    count = st.slider("Number of recipes to show", 1, 20, 10)
-
+    # removed: count slider
     submitted = st.form_submit_button("Search")
 
 # --- Handle empty input ---
@@ -39,38 +63,51 @@ if submitted and not query.strip():
 # --- Handle search ---
 elif submitted:
     health = "gluten-free" if gluten_free else None
-    results = search_recipes(query, meal_type, None, health, count * 2)
+    # fetch a fixed number and paginate locally
+    results = search_recipes(query, meal_type, None, health, API_FETCH_LIMIT)
 
     filtered = []
     for recipe in results:
         calories = recipe.get("calories", 0)
         protein = recipe.get("totalNutrients", {}).get("PROCNT", {}).get("quantity", 0)
-        if calories <= max_calories and protein >= min_protein:
+
+        passes_cal = (max_calories is None) or (calories <= max_calories)
+        passes_prot = (min_protein is None) or (protein >= min_protein)
+
+        if passes_cal and passes_prot:
             filtered.append(recipe)
-        if len(filtered) >= count:
-            break
 
     if not filtered:
-        st.info(f"😕 No recipes found for **{query}**. Try a different keyword!")
+        st.session_state.recipe_results = []  # 🧹 clear old search results
+        st.session_state.current_page = 0
+        st.info(f"😕 No recipes found for **{query}**. Try a different keyword or adjust filters!")
     else:
         st.session_state.recipe_results = filtered
+        st.session_state.current_page = 0  # reset to first page on new search
 
-# --- Display results ---
+# --- Display results with pagination ---
 if st.session_state.recipe_results:
-    st.subheader("🍲 Recipes")
-
-    cols_per_row = 3
     total = len(st.session_state.recipe_results)
-    rows = math.ceil(total / cols_per_row)
+    total_pages = max(1, math.ceil(total / PAGE_SIZE))
+    current_page = max(0, min(st.session_state.current_page, total_pages - 1))
+
+    start_idx = current_page * PAGE_SIZE
+    end_idx = min(start_idx + PAGE_SIZE, total)
+    page_items = st.session_state.recipe_results[start_idx:end_idx]
+
+    st.subheader(f"🍲 Recipes (Page {current_page + 1} of {total_pages})")
+
+    cols_per_row = 3  # 3 x 4 = 12 cards per page
+    rows = math.ceil(len(page_items) / cols_per_row)
 
     for row in range(rows):
         cols = st.columns(cols_per_row)
         for col_idx in range(cols_per_row):
             idx = row * cols_per_row + col_idx
-            if idx >= total:
+            if idx >= len(page_items):
                 break
 
-            recipe = st.session_state.recipe_results[idx]
+            recipe = page_items[idx]
             title = recipe.get("label", "No title")
             image_url = recipe.get("image", "")
             calories = int(recipe.get("calories", 0))
@@ -88,11 +125,11 @@ if st.session_state.recipe_results:
                         background: linear-gradient(to bottom right, #ffffff, #f9f9f9);
                         box-shadow: 0 4px 12px rgba(0,0,0,0.05);
                     ">
-                        <h4 style=\"color:#2E86C1; margin-top:0;\">{title}</h4>
-                        <img src=\"{image_url}\" style=\"width:100%; border-radius:10px; margin-bottom:1em;\" />
-                        <p style=\"font-size: 0.9em; margin: 4px 0;\"><strong>Calories:</strong> {calories} kcal</p>
-                        <p style=\"font-size: 0.9em; margin: 4px 0;\"><strong>Protein:</strong> {protein:.1f} g</p>
-                        <a href=\"{url}\" target=\"_blank\" style=\"
+                        <h4 style="color:#2E86C1; margin-top:0;">{title}</h4>
+                        <img src="{image_url}" style="width:100%; border-radius:10px; margin-bottom:1em;" />
+                        <p style="font-size: 0.9em; margin: 4px 0;"><strong>Calories:</strong> {calories} kcal</p>
+                        <p style="font-size: 0.9em; margin: 4px 0;"><strong>Protein:</strong> {protein:.1f} g</p>
+                        <a href="{url}" target="_blank" style="
                             display: inline-block;
                             padding: 8px 16px;
                             background: linear-gradient(135deg, #2980b9, #3498db);
@@ -102,15 +139,31 @@ if st.session_state.recipe_results:
                             font-size: 0.9em;
                             box-shadow: 0 2px 6px rgba(0,0,0,0.1);
                             transition: background 0.3s ease, transform 0.2s ease;
-                        \" onmouseover=\"this.style.transform='scale(1.05)'\" onmouseout=\"this.style.transform='scale(1)'\">
+                        " onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform='scale(1)'">
                             View Full Recipe
                         </a>
                     </div>
                 """, unsafe_allow_html=True)
 
-                if st.button("➕ Add to Shopping List", key=f"add_{idx}"):
+                if st.button("➕ Add to Shopping List", key=f"add_{start_idx+idx}"):
                     st.session_state.shopping_list.append((title, ingredients))
                     st.success(f"✅ Ingredients from '{title}' added! [🛒 Go to Shopping List](#shopping-list)")
+
+    # --- Pagination controls ---
+    nav_cols = st.columns([1, 2, 1])
+    with nav_cols[0]:
+        if st.button("◀ Previous", disabled=(current_page == 0), key="prev_page"):
+            st.session_state.current_page = current_page - 1
+            st.rerun()
+    with nav_cols[1]:
+        st.markdown(
+            f"<div style='text-align:center; font-weight:600;'>Page {current_page + 1} / {total_pages}</div>",
+            unsafe_allow_html=True,
+        )
+    with nav_cols[2]:
+        if st.button("Next ▶", disabled=(current_page >= total_pages - 1), key="next_page"):
+            st.session_state.current_page = current_page + 1
+            st.rerun()
 
 # --- Floating Top Button ---
 st.markdown("""
@@ -134,18 +187,6 @@ st.markdown("""
     transform: scale(1.05);
     background: linear-gradient(135deg, #3498db, #2980b9);
 }
-
-/* Show button on scroll */
-<script>
-window.addEventListener('scroll', function() {
-  const btn = document.querySelector('.top-button');
-  if (window.scrollY > 300) {
-    btn.style.display = 'inline-block';
-  } else {
-    btn.style.display = 'none';
-  }
-});
-</script>
 </style>
 <a href="#top" class="top-button">⬆️</a>
 """, unsafe_allow_html=True)
@@ -206,7 +247,7 @@ components.html("""
 }
 </style>
 
-<button onclick=\"topFunction()\" id=\"scrollTopBtn\">⬆️</button>
+<button onclick="topFunction()" id="scrollTopBtn">⬆️</button>
 
 <script>
 function topFunction() {
@@ -240,15 +281,15 @@ components.html("""
 }
 </style>
 
-<button onclick=\"topFunction()\" id=\"scrollTopBtn\">⬆️</button>
+<button onclick="topFunction()" id="scrollTopBtn">⬆️</button>
 
 <script>
-const scrollBtn = document.getElementById(\"scrollTopBtn\");
+const scrollBtn = document.getElementById("scrollTopBtn");
 window.onscroll = function() {
     if (document.body.scrollTop > 300 || document.documentElement.scrollTop > 300) {
-        scrollBtn.style.display = \"block\";
+        scrollBtn.style.display = "block";
     } else {
-        scrollBtn.style.display = \"none\";
+        scrollBtn.style.display = "none";
     }
 };
 function topFunction() {
